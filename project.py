@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import mysql.connector
 import time
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -123,7 +124,6 @@ def extract_topics():
 
     store_topics_in_db()
 
-
 def extract_content(topic_link):
     response = requests.get(topic_link)
     soup = BeautifulSoup(response.content, 'html.parser')
@@ -144,6 +144,7 @@ def summarize_content(text):
         model = genai.GenerativeModel(model_name="gemini-1.5-flash")
         prompt = "Summarize the following text in 50 words:"
         response = model.generate_content([prompt, text])
+        time.sleep(5)
         return response.text.strip()
     except Exception as e:
         print(f"Error in Gemini API call: {e}")
@@ -158,7 +159,6 @@ def store_topics_in_db():
             ON DUPLICATE KEY UPDATE topic_content = VALUES(topic_content), summary = VALUES(summary)
         """, (topic_name, topic_link, topic_content, category, summary))
     db.commit()
-
 
 def store_last_fetched_topic(category, first_topic):
     cursor.execute("SELECT * FROM last_fetched WHERE category_name = %s", (category,))
@@ -178,6 +178,13 @@ def store_last_fetched_topic(category, first_topic):
 
     db.commit()
 
+def get_topics_by_category(category):
+    cursor.execute("SELECT topic_name, topic_link, summary FROM topics WHERE associated_category = %s LIMIT 2", (category,))
+    result = cursor.fetchall()
+    if result:
+        return result
+    else:
+        return None
 
 def backfill_and_poll():
     while True:
@@ -186,39 +193,56 @@ def backfill_and_poll():
             result = cursor.fetchone()
             if result:
                 last_topic, last_fetched_time = result
-                if datetime.now() - last_fetched_time >= timedelta(days=1):
+                sub_response = requests.get(links[categories.index(category)])
+                sub_soup = BeautifulSoup(sub_response.content, 'html.parser')
+                latest_topic = sub_soup.select('td.main-link a.title')[0].text.strip()
+                if latest_topic != last_topic:
                     extract_topics()
+                    print(f"New topics fetched for category {category}.")
+                else:
+                    print(f"No new data for category {category}.")
             else:
-                extract_topics()  # First-time fetch for the category
-        print("Sleeping")
-        time.sleep(86400)
+                extract_topics()
+        print("Sleeping for 2 minutes...")
+        time.sleep(120)
 
-# Telegram bot handler
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "Welcome to the category bot. Use /categories to get started.")
+
 
 @bot.message_handler(commands=['categories'])
 def show_categories(message):
     cursor.execute("SELECT category_name FROM categories")
     result = cursor.fetchall()
-    categories_list = [r[0] for r in result]
-    if categories_list:
-        reply = "\n".join(categories_list)
-        bot.reply_to(message, f"Here are the categories:\n{reply}")
+
+    if result:
+        markup = InlineKeyboardMarkup()
+        for r in result:
+            category = r[0]
+            markup.add(InlineKeyboardButton(category, callback_data=category))
+
+        bot.reply_to(message, "Choose a category:", reply_markup=markup)
     else:
         bot.reply_to(message, "No categories found.")
 
-@bot.message_handler(func=lambda message: message.text in categories)
-def show_top_2_topics(message):
-    category = message.text
-    cursor.execute("SELECT topic_name, summary FROM topics WHERE associated_category = %s LIMIT 2", (category,))
-    result = cursor.fetchall()
-    if result:
-        reply = "\n".join([f"{r[0]}: {r[1]}" for r in result])
-        bot.reply_to(message, f"Top 2 topics in {category}:\n{reply}")
+# Handle category selection
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    category = call.data
+    topics = get_topics_by_category(category)
+
+    if topics:
+        reply = ""
+        for topic in topics:
+            topic_name = topic[0]
+            topic_link = topic[1]
+            summary = topic[2] if topic[2] else 'No summary available.'  # Default to 'No summary available'
+            reply += f"📌 *{topic_name}*\nSummary: {summary}\n🔗 [Link]({topic_link})\n\n"
+        bot.send_message(call.message.chat.id, f"Top 2 topics in {category}:\n{reply}", parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        bot.reply_to(message, f"No topics found for category: {category}")
+        bot.send_message(call.message.chat.id, f"No topics found for category: {category}")
 
 if __name__ == "__main__":
     url = 'https://gov.optimism.io/'
@@ -226,15 +250,12 @@ if __name__ == "__main__":
     soup = BeautifulSoup(response.content, 'html.parser')
     print("Started running")
 
-    create_tables()
+    # Uncomment the following to initialize and backfill categories and topics
+    # create_tables()
+    # extract_categories(soup)
+    # store_categories_in_db()
+    # extract_topics()
 
-    extract_categories(soup)
-
-    store_categories_in_db()
-
-    extract_topics()
-
-    # Running backfill_and_poll() in a separate thread
     thread = threading.Thread(target=backfill_and_poll)
     thread.start()
 
