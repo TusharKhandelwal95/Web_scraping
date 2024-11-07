@@ -142,7 +142,7 @@ def extract_content(topic_link):
 def summarize_content(text):
     try:
         model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-        prompt = "Summarize the following text in 50 words:"
+        prompt = "You are an experienced summarizer. Summarize the following text in about 50 words, making it sound as if a skilled person generated it."
         response = model.generate_content([prompt, text])
         time.sleep(5)
         return response.text.strip()
